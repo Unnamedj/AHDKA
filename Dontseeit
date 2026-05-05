@@ -1,8 +1,9 @@
--- // CONFIGURACION INTEGRADA (Abubi / hub Fastify)
--- API HTTP: puerto 3000. El dashboard en el navegador: http://IP:3000/?key=TU_CLAVE (misma clave) para ver logs/cola en vivo por WS.
+-- // =============================================
+-- // HOPPER HÍBRIDO FULL - Railway (Jobs) + Vultr (Report)
+-- // =============================================
+
+local RAILWAY_URL = "https://jobidgayner-production.up.railway.app"
 local VULTR_IP = "http://140.82.9.158:3000"
--- OBLIGATORIO: misma clave que API_KEY o NOTIFIER_HUB_TOKEN en el .env del VPS.
--- Si dejas el placeholder, /report-data falla (401) y la cola queda vacía → hop nunca recibe JobID.
 local VULTR_API_KEY = "MARIAAAAABELENNNNNNN2777776777777"
 
 local PLACE_ID = 109983668079237
@@ -23,7 +24,9 @@ local Workspace = game:GetService("Workspace")
 local HttpService = game:GetService("HttpService")
 local TeleportService = game:GetService("TeleportService")
 local LocalPlayer = Players.LocalPlayer
+
 local requestFunc = syn and syn.request or http_request or http and http.request or request
+
 local lastAttemptedJobId = nil
 local failedJobIds = {}
 
@@ -32,26 +35,14 @@ if not requestFunc then
 	return
 end
 
--- // REDUCIR CALIDAD / CARGA
-pcall(function()
-	settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-end)
-
-pcall(function()
-	setfpscap(4)
-end)
-
-pcall(function()
-	game:GetService("ReplicatedFirst"):RemoveDefaultLoadingScreen()
-end)
+-- // REDUCIR CALIDAD
+pcall(function() settings().Rendering.QualityLevel = Enum.QualityLevel.Level01 end)
+pcall(function() setfpscap(4) end)
+pcall(function() game:GetService("ReplicatedFirst"):RemoveDefaultLoadingScreen() end)
 
 -- // ESPERAR CARGA
-repeat
-	task.wait()
-until game:IsLoaded()
-repeat
-	task.wait()
-until Players.LocalPlayer
+repeat task.wait() until game:IsLoaded()
+repeat task.wait() until Players.LocalPlayer
 LocalPlayer = Players.LocalPlayer
 task.wait(5)
 
@@ -61,9 +52,7 @@ do
 	local lastAntiIdle = 0
 	LocalPlayer.Idled:Connect(function()
 		local now = tick()
-		if now - lastAntiIdle < 60 then
-			return
-		end
+		if now - lastAntiIdle < 60 then return end
 		lastAntiIdle = now
 		pcall(function()
 			vu:CaptureController()
@@ -74,197 +63,127 @@ end
 
 -- // UTILIDADES
 local function formatNum(n)
-	if n >= 1e9 then
-		return string.format("%.2fB", n / 1e9)
-	elseif n >= 1e6 then
-		return string.format("%.2fM", n / 1e6)
-	elseif n >= 1e3 then
-		return string.format("%.2fK", n / 1e3)
-	else
-		return tostring(math.floor(n))
-	end
+	if n >= 1e9 then return string.format("%.2fB", n / 1e9)
+	elseif n >= 1e6 then return string.format("%.2fM", n / 1e6)
+	elseif n >= 1e3 then return string.format("%.2fK", n / 1e3)
+	else return tostring(math.floor(n)) end
 end
 
-local function shouldScan(value)
-	return value >= MIN_REPORT_VALUE
-end
+local function shouldScan(value) return value >= MIN_REPORT_VALUE end
 
 local function getTier(v)
-	if v >= 1e9 then
-		return "1b"
-	elseif v >= 400e6 then
-		return "400m"
-	elseif v >= 100e6 then
-		return "100m"
-	elseif v >= 10e6 then
-		return "10m"
-	end
+	if v >= 1e9 then return "1b"
+	elseif v >= 400e6 then return "400m"
+	elseif v >= 100e6 then return "100m"
+	elseif v >= 10e6 then return "10m" end
 	return "low"
 end
 
--- Algunos executors NO mandan headers en GET; el servidor acepta ?key= o ?auth= en la URL.
-local function hubKeyQuery()
-	return HttpService:UrlEncode(VULTR_API_KEY)
-end
-
-local function hubHeadersJson()
-	return {
-		["Content-Type"] = "application/json",
-		["X-API-Key"] = VULTR_API_KEY,
-	}
-end
-
-local function hubHeadersGet()
-	return {
-		["X-API-Key"] = VULTR_API_KEY,
-	}
-end
-
-local function getJobUrl(waitSec)
-	local w = waitSec or 8
-	return string.format("%s/get-job?wait=%d&key=%s", VULTR_IP, w, hubKeyQuery())
+-- ====================== ENDPOINTS ======================
+local function getJobUrl()
+	return RAILWAY_URL .. "/server?size=1"
 end
 
 local function reportDataUrl()
-	return string.format("%s/report-data?key=%s", VULTR_IP, hubKeyQuery())
+	return string.format("%s/report-data?key=%s", VULTR_IP, HttpService:UrlEncode(VULTR_API_KEY))
 end
+-- =======================================================
 
-if VULTR_API_KEY == "PASTE_TU_CLAVE_DEL_ENV" or VULTR_API_KEY == "" then
-	warn("[CONFIG] VULTR_API_KEY sin configurar → el hub rechazará reportes y la cola de jobs estará vacía.")
-end
-
--- // API HOPPER — /get-job (?wait= espera si la cola está vacía; ?key= autentica aunque el executor ignore headers)
+-- // HOP - Railway
 local function hop()
 	while true do
-		print("[HOP] Solicitando nuevo servidor...")
+		print("[HOP] Solicitando nuevo servidor de Railway...")
 		local ok, response = pcall(function()
 			return requestFunc({
-				Url = getJobUrl(8),
+				Url = getJobUrl(),
 				Method = "GET",
-				Headers = hubHeadersGet(),
+				Headers = { ["username"] = LocalPlayer.Name },
 			})
 		end)
 
 		local sc = ok and response and response.StatusCode
 		local body = ok and response and type(response.Body) == "string" and response.Body or ""
 
-		if ok and response and sc == 200 then
-			local decodeOk, data = pcall(function()
-				return HttpService:JSONDecode(body)
-			end)
-			if decodeOk and data and data.id and data.empty ~= true then
-				local targetJobId = tostring(data.id)
-				local isGuidLike = targetJobId:match("^[%w%-]+$") ~= nil
-				local isUsable = isGuidLike and targetJobId ~= "" and targetJobId ~= game.JobId and not failedJobIds[targetJobId]
-				if isUsable then
-					lastAttemptedJobId = targetJobId
-					print("[HOP] Teleport a JobID:", targetJobId:sub(1, 8), "...")
-					TeleportService:TeleportToPlaceInstance(PLACE_ID, targetJobId, LocalPlayer)
-					return
-				end
-			elseif decodeOk and data and data.empty == true then
-				print("[HOP] Cola vacía (nadie ha reportado servidores al hub). Espera scanners o revisa API_KEY en VPS.")
+		if ok and sc == 200 and body and body ~= "" then
+			local targetJobId = body:match("^%s*([%w%-]+)%s*$")
+			if targetJobId and targetJobId ~= game.JobId and not failedJobIds[targetJobId] then
+				lastAttemptedJobId = targetJobId
+				print("[HOP] Teleport a JobID:", targetJobId:sub(1, 12), "...")
+				TeleportService:TeleportToPlaceInstance(PLACE_ID, targetJobId, LocalPlayer)
+				return
 			end
-		elseif sc == 401 then
-			warn("[HOP] 401 Unauthorized — VULTR_API_KEY no coincide con el .env del servidor (o falta ?key=).")
-		elseif sc == 404 then
-			print("[HOP] 404 Cola vacía (modo legacy). Reintentando...")
+		elseif sc == 503 then
+			print("[HOP] Pool sin servidores (503), reintentando...")
 		else
-			warn("[HOP] Respuesta rara StatusCode=", tostring(sc), " body=", body:sub(1, 120))
+			warn("[HOP] Error StatusCode=", tostring(sc))
 		end
-
 		task.wait(3)
 	end
 end
 
 TeleportService.TeleportInitFailed:Connect(function(player, result, errorMessage)
 	if player == LocalPlayer then
-		if lastAttemptedJobId then
-			failedJobIds[lastAttemptedJobId] = true
-		end
-		warn("[HOP] Teleport failed:", tostring(result), tostring(errorMessage), "job:", tostring(lastAttemptedJobId))
-		task.wait(1)
+		if lastAttemptedJobId then failedJobIds[lastAttemptedJobId] = true end
+		warn("[HOP] Teleport falló, reintentando...")
+		task.wait(1.5)
 		hop()
 	end
 end)
 
--- // FUNCION ANTI-DETECCION (BYPASS SYNCHRONIZER)
+-- // SAFE REQUIRE
 local function safeRequire(module)
 	local get_thread_identity = getthreadidentity or getidentity or function() return 2 end
 	local set_thread_identity = setthreadidentity or setidentity or function() end
-	
-	local success, result = pcall(function()
-		local currentIdentity = get_thread_identity()
-		set_thread_identity(2) -- Engaña al juego haciéndole creer que es un LocalScript normal
-		local req = require(module)
-		set_thread_identity(currentIdentity) -- Restaura la identidad del executor
-		return req
-	end)
-	
-	if success then
-		return result
-	else
-		return require(module) -- Fallback en caso de error
-	end
+	local current = get_thread_identity()
+	set_thread_identity(2)
+	local success, result = pcall(require, module)
+	set_thread_identity(current)
+	return success and result or require(module)
 end
 
--- // CARGA MODULOS DE JUEGO
 local function waitForPath(parent, ...)
 	local current = parent
 	for _, name in ipairs({ ... }) do
 		current = current:WaitForChild(name, 10)
-		if not current then
-			return nil
-		end
+		if not current then return nil end
 	end
 	return current
 end
 
+-- // CARGAR MÓDULOS
 local sync, animalsData, animalsShared, numberUtils
-
-local function loadModules()
+for i = 1, 5 do
 	local ok, err = pcall(function()
-		-- Usamos safeRequire para evitar detecciones del AntiCheat en el Require
 		sync = safeRequire(waitForPath(game.ReplicatedStorage, "Packages", "Synchronizer"))
 		animalsData = safeRequire(waitForPath(game.ReplicatedStorage, "Datas", "Animals"))
 		animalsShared = safeRequire(waitForPath(game.ReplicatedStorage, "Shared", "Animals"))
 		numberUtils = safeRequire(waitForPath(game.ReplicatedStorage, "Utils", "NumberUtils"))
 	end)
-	return ok, err
-end
-
-for i = 1, 5 do
-	local ok, err = loadModules()
 	if ok and sync and animalsData and animalsShared and numberUtils then
-		print("[INIT] Modulos cargados")
+		print("[INIT] Módulos cargados correctamente")
 		break
 	end
-	warn("[INIT] Intento de carga " .. i .. " fallo: " .. tostring(err))
 	task.wait(2)
 end
 
 if not (sync and animalsData and animalsShared and numberUtils) then
-	warn("[FATAL] No se pudieron cargar modulos, hop...")
+	warn("[FATAL] No se pudieron cargar los módulos")
 	hop()
 	return
 end
 
--- // DEDUP ENTRE SCANS
+-- // DEDUP
 local loggedBrainrots = {}
 
-local function getLogKey(jobId, name, gen)
-	return jobId .. ":" .. name .. ":" .. gen
-end
-
 local function hasBeenLogged(jobId, name, gen)
-	return loggedBrainrots[getLogKey(jobId, name, gen)] == true
+	return loggedBrainrots[jobId .. ":" .. name .. ":" .. gen] == true
 end
 
 local function markAsLogged(jobId, name, gen)
-	loggedBrainrots[getLogKey(jobId, name, gen)] = true
+	loggedBrainrots[jobId .. ":" .. name .. ":" .. gen] = true
 end
 
--- // FUSION / DUEL CHECKS
+-- // CHECKS
 local function isFusing(animalData)
 	if animalData.Machine and animalData.Machine.Type == "Fuse" and animalData.Machine.Active then
 		return true
@@ -276,166 +195,58 @@ local function isInDuel(animalData)
 	local data = animalData.Data or animalData
 	if animalData.Machine and type(animalData.Machine) == "table" then
 		local mType = animalData.Machine.Type
-		if type(mType) == "string" and mType:lower():find("duel") then
-			return true
-		end
+		if type(mType) == "string" and mType:lower():find("duel") then return true end
 	end
-	if data and type(data) == "table" and data.Machine and type(data.Machine) == "table" then
+	if data and data.Machine and type(data.Machine) == "table" then
 		local mType = data.Machine.Type
-		if type(mType) == "string" and mType:lower():find("duel") then
-			return true
-		end
+		if type(mType) == "string" and mType:lower():find("duel") then return true end
 	end
-	if animalData.InDuel == true or animalData.inDuel == true or animalData.in_duel == true then
-		return true
-	end
-	if type(data) == "table" and (data.InDuel == true or data.inDuel == true) then
-		return true
-	end
+	if animalData.InDuel or animalData.inDuel or animalData.in_duel then return true end
 	return false
 end
 
-local function cameBackFromDuel(player)
-	if player == LocalPlayer then
-		local ok, data = pcall(function()
-			return TeleportService:GetLocalPlayerTeleportData()
-		end)
-		if ok and type(data) == "table" and (data.fromDuel or data.DuelData or data.duel) then
-			return true
-		end
-	end
-
-	for _, child in ipairs(player:GetChildren()) do
-		local lower = child.Name:lower()
-		if lower:find("duel") or lower:find("returned") then
-			return true
-		end
-	end
-
-	local attrsOk, attrs = pcall(function()
-		return player:GetAttributes()
-	end)
-	if attrsOk and attrs then
-		for key, val in pairs(attrs) do
-			local keyLower = tostring(key):lower()
-			if (keyLower:find("duel") or keyLower:find("returned")) and (val == true or val == 1) then
-				return true
-			end
-		end
-	end
-
-	return false
-end
-
-local function getPlotOwner(plot)
-	local owner = plot:GetAttribute("Owner") or plot:GetAttribute("PlayerName") or plot.Name
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Name == owner or tostring(player.UserId) == tostring(owner) then
-			return player
-		end
-	end
-	return nil
-end
-
-local function getDuelPlayers()
-	local duelPlayers = {}
-	for _, player in ipairs(Players:GetPlayers()) do
-		if cameBackFromDuel(player) then
-			duelPlayers[player.Name] = true
-			duelPlayers[tostring(player.UserId)] = true
-		end
-	end
-	return duelPlayers
-end
-
-local function isPlotOwnerInDuel(plot, duelPlayers)
-	local owner = plot:GetAttribute("Owner") or plot:GetAttribute("PlayerName") or plot.Name
-	if duelPlayers[owner] or duelPlayers[tostring(owner)] then
-		return true
-	end
-	local player = getPlotOwner(plot)
-	if player and (duelPlayers[player.Name] or duelPlayers[tostring(player.UserId)]) then
-		return true
-	end
-	return false
-end
-
--- // ESCANEO CARPET
+-- // SCAN CARPET (FULL)
 local function scanCarpet(seen, currentJobId)
 	local results = {}
-
 	for _, instance in ipairs(Workspace:GetChildren()) do
-		if instance.ClassName ~= "Model" then
-			continue
-		end
-
+		if instance.ClassName ~= "Model" then continue end
 		local name = instance:GetAttribute("Index")
-		if not name or not animalsData[name] then
-			continue
-		end
+		if not name or not animalsData[name] then continue end
 
 		local mutation = instance:GetAttribute("Mutation")
-		if type(mutation) ~= "string" or mutation == "" then
-			mutation = nil
-		end
+		if type(mutation) ~= "string" or mutation == "" then mutation = nil end
 
 		local traitsTable = nil
 		local traitsList = {}
 		local traitsRaw = instance:GetAttribute("Traits")
 		if traitsRaw and type(traitsRaw) == "string" then
-			local ok, decoded = pcall(HttpService.JSONDecode, HttpService, traitsRaw)
+			local ok, decoded = pcall(function() return HttpService:JSONDecode(traitsRaw) end)
 			if ok and type(decoded) == "table" then
 				traitsTable = {}
-				if #decoded > 0 then
-					for _, trait in ipairs(decoded) do
-						if type(trait) == "string" then
-							table.insert(traitsTable, trait)
-							table.insert(traitsList, trait)
-						end
-					end
-				else
-					for traitName, enabled in pairs(decoded) do
-						if enabled then
-							table.insert(traitsTable, traitName)
-							table.insert(traitsList, traitName)
-						end
+				for _, trait in ipairs(decoded) do
+					if type(trait) == "string" then
+						table.insert(traitsTable, trait)
+						table.insert(traitsList, trait)
 					end
 				end
-				if #traitsTable == 0 then
-					traitsTable = nil
-				end
+				if #traitsTable == 0 then traitsTable = nil end
 			end
 		end
 
-		if instance:GetAttribute("Fusing") == true then
-			continue
-		end
+		if instance:GetAttribute("Fusing") == true then continue end
 
 		local okGen, genValue = pcall(function()
 			return animalsShared:GetGeneration(name, mutation, traitsTable, nil)
 		end)
-		if not okGen or type(genValue) ~= "number" then
-			continue
-		end
+		if not okGen or type(genValue) ~= "number" or not shouldScan(genValue) then continue end
 
-		if not shouldScan(genValue) then
-			continue
-		end
-
-		local tier = getTier(genValue)
 		local genText = "$" .. numberUtils:ToString(genValue) .. "/s"
 		local key = "carpet:" .. name .. ":" .. genText
-		if seen[key] then
-			continue
-		end
+		if seen[key] or hasBeenLogged(currentJobId, name, genText) then continue end
 		seen[key] = true
 
-		if hasBeenLogged(currentJobId, name, genText) then
-			continue
-		end
-
 		table.insert(results, {
-			tier = tier,
+			tier = getTier(genValue),
 			name = name,
 			money = genText,
 			numeric = genValue,
@@ -448,205 +259,90 @@ local function scanCarpet(seen, currentJobId)
 			isContext = false,
 		})
 	end
-
 	return results
 end
 
--- // ESCANEO PLOTS (CON DUELS)
-local function scanPlots(duelPlayers, seen, currentJobId)
+-- // SCAN PLOTS (FULL)
+local function scanPlots(seen, currentJobId)
 	local results = {}
 	local plots = Workspace:FindFirstChild("Plots")
-	if not plots then
-		return results
-	end
+	if not plots then return results end
 
 	for _, plot in ipairs(plots:GetChildren()) do
-		local okPot, pot = pcall(function()
-			return sync:Get(plot.Name)
-		end)
-		if not okPot or not pot then
-			continue
-		end
+		local okPot, pot = pcall(function() return sync:Get(plot.Name) end)
+		if not okPot or not pot then continue end
 
-		local okList, list = pcall(function()
-			return pot:Get("AnimalList")
-		end)
-		if not okList or type(list) ~= "table" then
-			continue
-		end
-
-		local syncOwner = nil
-		local ownerOk, ownerVal = pcall(function()
-			return pot:Get("Owner")
-		end)
-		if ownerOk and ownerVal ~= nil then
-			syncOwner = tostring(ownerVal)
-		end
-
-		local plotDuel = false
-		if syncOwner and type(syncOwner) == "string" then
-			if duelPlayers[syncOwner] then
-				plotDuel = true
-			end
-		else
-			plotDuel = isPlotOwnerInDuel(plot, duelPlayers)
-		end
-
-		local plotItems = {}
-		local plotHasQualifying = false
+		local okList, list = pcall(function() return pot:Get("AnimalList") end)
+		if not okList or type(list) ~= "table" then continue end
 
 		for _, animalData in pairs(list) do
-			if type(animalData) ~= "table" then
-				continue
-			end
-			if isFusing(animalData) then
-				continue
-			end
+			if type(animalData) ~= "table" or isFusing(animalData) then continue end
 
-			local inDuel = isInDuel(animalData) or plotDuel
 			local name = animalData.Index
-			if not name or not animalsData[name] then
-				continue
-			end
+			if not name or not animalsData[name] then continue end
 
 			local data = animalData.Data or animalData
 			local mutation = data.Mutation
-			if type(mutation) ~= "string" or mutation == "" then
-				mutation = nil
-			end
+			if type(mutation) ~= "string" or mutation == "" then mutation = nil end
 
 			local traitsTable = nil
 			local traitsList = {}
 			if type(data.Traits) == "table" then
 				traitsTable = {}
-				if #data.Traits > 0 then
-					for _, trait in ipairs(data.Traits) do
-						if type(trait) == "string" then
-							table.insert(traitsTable, trait)
-							table.insert(traitsList, trait)
-						end
-					end
-				else
-					for traitName, enabled in pairs(data.Traits) do
-						if enabled then
-							table.insert(traitsTable, traitName)
-							table.insert(traitsList, traitName)
-						end
+				for _, trait in ipairs(data.Traits) do
+					if type(trait) == "string" then
+						table.insert(traitsTable, trait)
+						table.insert(traitsList, trait)
 					end
 				end
-				if #traitsTable == 0 then
-					traitsTable = nil
-				end
+				if #traitsTable == 0 then traitsTable = nil end
 			end
 
 			local okGen, genValue = pcall(function()
 				return animalsShared:GetGeneration(name, mutation, traitsTable, nil)
 			end)
-			if not okGen or type(genValue) ~= "number" then
-				continue
-			end
+			if not okGen or type(genValue) ~= "number" or not shouldScan(genValue) then continue end
 
-			local qualifies = shouldScan(genValue)
-			if qualifies then
-				plotHasQualifying = true
-			end
-
-			table.insert(plotItems, {
-				name = name,
-				genValue = genValue,
-				mutation = mutation,
-				traitsList = traitsList,
-				traitCount = traitsTable and #traitsTable or 0,
-				inDuel = inDuel,
-				qualifies = qualifies,
-			})
-		end
-
-		if not plotHasQualifying then
-			continue
-		end
-
-		for _, item in ipairs(plotItems) do
-			local genText = "$" .. numberUtils:ToString(item.genValue) .. "/s"
-			local key = "plot:" .. item.name .. ":" .. genText
-			if seen[key] then
-				continue
-			end
+			local genText = "$" .. numberUtils:ToString(genValue) .. "/s"
+			local key = "plot:" .. name .. ":" .. genText
+			if seen[key] or hasBeenLogged(currentJobId, name, genText) then continue end
 			seen[key] = true
 
-			if hasBeenLogged(currentJobId, item.name, genText) then
-				continue
-			end
-
 			table.insert(results, {
-				tier = getTier(item.genValue),
-				name = item.name,
+				tier = getTier(genValue),
+				name = name,
 				money = genText,
-				numeric = item.genValue,
-				mutation = item.mutation,
-				traits = #item.traitsList > 0 and item.traitsList or nil,
-				traitCount = item.traitCount,
+				numeric = genValue,
+				mutation = mutation,
+				traits = #traitsList > 0 and traitsList or nil,
+				traitCount = traitsTable and #traitsTable or 0,
 				isFusing = false,
-				inDuel = item.inDuel,
+				inDuel = isInDuel(animalData),
 				isCarpet = false,
-				isContext = not item.qualifies,
+				isContext = false,
 			})
 		end
 	end
-
 	return results
 end
 
 local function scanAll()
 	local seen = {}
 	local currentJobId = game.JobId
-	local duelPlayers = getDuelPlayers()
-
-	local plotResults = scanPlots(duelPlayers, seen, currentJobId)
+	local plotResults = scanPlots(seen, currentJobId)
 	local carpetResults = scanCarpet(seen, currentJobId)
-
 	local allResults = {}
-	for _, item in ipairs(plotResults) do
-		table.insert(allResults, item)
-	end
-	for _, item in ipairs(carpetResults) do
-		table.insert(allResults, item)
-	end
 
-	table.sort(allResults, function(a, b)
-		return a.numeric > b.numeric
-	end)
+	for _, v in ipairs(plotResults) do table.insert(allResults, v) end
+	for _, v in ipairs(carpetResults) do table.insert(allResults, v) end
 
+	table.sort(allResults, function(a, b) return a.numeric > b.numeric end)
 	return allResults
 end
 
-local function sourceLabel(item)
-	if item.isCarpet then
-		return "carpet"
-	end
-	return "plot"
-end
-
--- // REPORTE (hub /report-data + Discord)
+-- // REPORTE A VULTR
 local function reportEverything(bestItem, allItems)
 	local jid = game.JobId
-	local jCode = "game:GetService('TeleportService'):TeleportToPlaceInstance(" .. PLACE_ID .. ", '" .. jid .. "', game.Players.LocalPlayer)"
-	local pCount = tostring(#Players:GetPlayers()) .. "/8"
-	local plotCount = 0
-	local carpetCount = 0
-	local duelCount = 0
-
-	for _, item in ipairs(allItems) do
-		if item.isCarpet then
-			carpetCount = carpetCount + 1
-		else
-			plotCount = plotCount + 1
-		end
-		if item.inDuel then
-			duelCount = duelCount + 1
-		end
-	end
-
 	local apiItems = {}
 	for _, item in ipairs(allItems) do
 		table.insert(apiItems, {
@@ -654,7 +350,7 @@ local function reportEverything(bestItem, allItems)
 			money = item.money,
 			numeric = item.numeric,
 			tier = item.tier,
-			source = sourceLabel(item),
+			source = item.isCarpet and "carpet" or "plot",
 			inDuel = item.inDuel == true,
 			mutation = item.mutation,
 			traits = item.traits,
@@ -662,143 +358,82 @@ local function reportEverything(bestItem, allItems)
 		})
 	end
 
-	-- 1) API del hub PRIMERO (AJ /check-reports y dashboard leen esto). Discord va después: si la API falla, igual ves el fallo aquí.
-	local reportOk, reportResult = pcall(function()
-		return requestFunc({
+	-- Enviar a Vultr
+	pcall(function()
+		requestFunc({
 			Url = reportDataUrl(),
 			Method = "POST",
-			Headers = hubHeadersJson(),
+			Headers = { ["Content-Type"] = "application/json" },
 			Body = HttpService:JSONEncode({
 				jobId = jid,
 				name = bestItem.name,
 				money = bestItem.money,
 				numeric = bestItem.numeric,
-				source = sourceLabel(bestItem),
+				source = bestItem.isCarpet and "carpet" or "plot",
 				inDuel = bestItem.inDuel == true,
 				isContext = bestItem.isContext == true,
 				players = #Players:GetPlayers(),
-				counts = {
-					total = #allItems,
-					plot = plotCount,
-					carpet = carpetCount,
-					duel = duelCount,
-				},
-				best = {
-					name = bestItem.name,
-					money = bestItem.money,
-					numeric = bestItem.numeric,
-					source = sourceLabel(bestItem),
-					inDuel = bestItem.inDuel == true,
-					mutation = bestItem.mutation,
-					traits = bestItem.traits,
-					traitCount = bestItem.traitCount or 0,
-				},
-				brainrots = apiItems,
-			}),
+				brainrots = apiItems
+			})
 		})
+		print("[REPORT] Enviado correctamente a Vultr")
 	end)
-	if not reportOk then
-		warn("[REPORT] requestFunc lanzó error (no llegó al hub):", tostring(reportResult))
-	elseif type(reportResult) ~= "table" then
-		warn("[REPORT] respuesta rara (no tabla):", tostring(reportResult))
-	else
-		local sc = reportResult.StatusCode
-		local bod = type(reportResult.Body) == "string" and reportResult.Body or ""
-		if sc == 200 then
-			print("[REPORT] Hub OK — /report-data OK · JobID:", jid:sub(1, 13), "...")
-		elseif sc == 401 then
-			warn("[REPORT] 401 — VULTR_API_KEY distinta del API_KEY del .env o falta ?key= en URL")
-		elseif sc == 404 then
-			warn("[REPORT] 404 — ruta mal (¿puerto viejo 8080? debe ser :3000) o servidor sin /report-data")
-		else
-			warn("[REPORT] Hub HTTP", tostring(sc), bod:sub(1, 200))
-		end
-	end
 
+	-- Webhooks Discord
 	local hook = nil
-	if bestItem.numeric >= 1e9 then
-		hook = WEBHOOKS["1b_plus"]
-	elseif bestItem.numeric >= 400e6 then
-		hook = WEBHOOKS["400_1b"]
-	elseif bestItem.numeric >= 100e6 then
-		hook = WEBHOOKS["100_400"]
-	elseif bestItem.numeric >= 10e6 then
-		hook = WEBHOOKS["10_100"]
-	end
+	if bestItem.numeric >= 1e9 then hook = WEBHOOKS["1b_plus"]
+	elseif bestItem.numeric >= 400e6 then hook = WEBHOOKS["400_1b"]
+	elseif bestItem.numeric >= 100e6 then hook = WEBHOOKS["100_400"]
+	elseif bestItem.numeric >= 10e6 then hook = WEBHOOKS["10_100"] end
 
-	if not hook then
-		return
-	end
-
-	local listLines = {}
-	for i = 1, math.min(#allItems, 30) do
-		local item = allItems[i]
-		if item.numeric >= LIST_MIN_VALUE then
-			local tags = "[" .. string.upper(sourceLabel(item)) .. "]"
-			if item.inDuel then
-				tags = tags .. "[DUEL]"
+	if hook then
+		local listLines = {}
+		for i = 1, math.min(#allItems, 25) do
+			local item = allItems[i]
+			if item.numeric >= LIST_MIN_VALUE then
+				local tags = "[" .. (item.isCarpet and "CARPET" or "PLOT") .. "]"
+				if item.inDuel then tags = tags .. "[DUEL]" end
+				table.insert(listLines, string.format("%s %s (%s)", tags, item.name, formatNum(item.numeric)))
 			end
-			table.insert(listLines, string.format("%s 1x %s (%s)", tags, item.name, formatNum(item.numeric)))
 		end
-	end
-	local brainrotList = "```\n" .. table.concat(listLines, "\n") .. "\n```"
-	local bestSource = string.upper(sourceLabel(bestItem))
-	local bestDuel = bestItem.inDuel and "YES" or "NO"
 
-	local payload = {
-		embeds = {
-			{
+		local payload = {
+			embeds = {{
 				title = bestItem.name .. " (" .. formatNum(bestItem.numeric) .. ")",
 				description = EMBED_BRAND,
 				color = EMBED_COLOR,
 				fields = {
-					{
-						name = "Summary",
-						value = string.format("Total: %d | Plot: %d | Carpet: %d | Duel: %d", #allItems, plotCount, carpetCount, duelCount),
-						inline = false,
-					},
-					{ name = "🏷️ Name", value = bestItem.name, inline = false },
-					{ name = "💰 Money per sec", value = bestItem.money, inline = false },
-					{ name = "📍 Source", value = bestSource, inline = true },
-					{ name = "⚔️ In Duel", value = bestDuel, inline = true },
-					{ name = "👥 Players", value = pCount, inline = false },
-					{ name = "Job ID (Mobile)", value = "`" .. jid .. "`", inline = false },
-					{ name = "Job ID (PC)", value = "```" .. jid .. "```", inline = false },
-					{ name = "Join Script (PC)", value = "```" .. jCode .. "```", inline = false },
-					{ name = "🧠 Brainrots", value = brainrotList, inline = false },
-				},
-				footer = { text = EMBED_BRAND },
-			},
-		},
-	}
-
-	pcall(function()
-		requestFunc({
-			Url = hook,
-			Method = "POST",
-			Headers = { ["Content-Type"] = "application/json" },
-			Body = HttpService:JSONEncode(payload),
-		})
-	end)
+					{ name = "Job ID", value = "`"..jid.."`", inline = false },
+					{ name = "Players", value = #Players:GetPlayers().."/8", inline = true },
+				}
+			}}
+		}
+		pcall(function()
+			requestFunc({
+				Url = hook,
+				Method = "POST",
+				Headers = {["Content-Type"] = "application/json"},
+				Body = HttpService:JSONEncode(payload)
+			})
+		end)
+	end
 
 	for _, item in ipairs(allItems) do
 		markAsLogged(jid, item.name, item.money)
 	end
 end
 
--- // EJECUCION
+-- // MAIN
 local function main()
-	print("[SCANNER] Escaneando server...")
+	print("[SCANNER] Escaneando servidor...")
 	local results = scanAll()
-
 	if #results > 0 then
-		print("[SCANNER] Encontrados:", #results, "| Mejor:", results[1].name, results[1].money, "| Duel:", tostring(results[1].inDuel))
+		print("[SCANNER] Encontrados:", #results, "| Mejor:", results[1].name, results[1].money)
 		reportEverything(results[1], results)
 		task.wait(1)
 	else
-		print("[SCANNER] Sin resultados en este servidor")
+		print("[SCANNER] Sin brainrots en este servidor")
 	end
-
 	hop()
 end
 
