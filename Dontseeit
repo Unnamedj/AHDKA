@@ -2,7 +2,7 @@
 -- // HOPPER HÍBRIDO FULL - Railway (Jobs) + Vultr (Report)
 -- // =============================================
 
-local RAILWAY_URL = "https://jobidgayner-production.up.railway.app"
+local RAILWAY_URL = "https://jobidgayner-production-914c.up.railway.app"
 local VULTR_IP = "http://140.82.9.158:3000"
 local VULTR_API_KEY = "MARIAAAAABELENNNNNNN2777776777777"
 
